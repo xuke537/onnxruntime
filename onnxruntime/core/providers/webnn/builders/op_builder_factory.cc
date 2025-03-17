@@ -82,7 +82,7 @@ static OpBuilderRegistrations CreateOpBuilderRegistrations() {
   }
 
   {  // CumSum
-    CreateConcatOpBuilder("CumSum", op_registrations);
+    CreateCumSumOpBuilder("CumSum", op_registrations);
   }
 
   {  // Dropout
@@ -159,6 +159,7 @@ static OpBuilderRegistrations CreateOpBuilderRegistrations() {
     CreateNormalizationOpBuilder("InstanceNormalization", op_registrations);
     CreateNormalizationOpBuilder("LayerNormalization", op_registrations);
     CreateNormalizationOpBuilder("SimplifiedLayerNormalization", op_registrations);
+    CreateNormalizationOpBuilder("SkipSimplifiedLayerNormalization", op_registrations);
   }
 
   {  // Pad
@@ -193,6 +194,10 @@ static OpBuilderRegistrations CreateOpBuilderRegistrations() {
 
   {  // Resize
     CreateResizeOpBuilder("Resize", op_registrations);
+  }
+
+  {  // RotaryEmbedding
+    CreateRotaryEmbeddingOpBuilder("RotaryEmbedding", op_registrations);
   }
 
   {  // ScatterElements

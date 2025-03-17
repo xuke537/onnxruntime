@@ -51,9 +51,6 @@ jobs:
   timeoutInMinutes: 240
 
   steps:
-  - task: mspremier.PostBuildCleanup.PostBuildCleanup-task.PostBuildCleanup@3
-    displayName: 'Clean Agent Directories'
-    condition: always()
 
   - checkout: self
     clean: true
@@ -84,7 +81,7 @@ jobs:
   - task: CmdLine@2
     inputs:
       script: |
-        docker run --rm \
+        docker run -e SYSTEM_COLLECTIONURI --rm \
           --security-opt seccomp=unconfined \
           --shm-size=1024m \
           --user $UID:$(id -g $USER) \
@@ -114,7 +111,7 @@ jobs:
               --update \
               --build_dir /build \
               --build \
-              --parallel \
+              --parallel --use_vcpkg --use_vcpkg_ms_internal_asset_cache \
               --build_wheel \
               --skip_submodule_sync \
               --use_cache \
@@ -169,7 +166,7 @@ jobs:
   - task: CmdLine@2
     inputs:
       script: |
-        docker run --rm \
+        docker run -e SYSTEM_COLLECTIONURI --rm \
           --security-opt seccomp=unconfined \
           --shm-size=1024m \
           --device=/dev/kfd \

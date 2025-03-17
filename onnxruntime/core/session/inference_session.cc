@@ -38,8 +38,11 @@
 #include "core/framework/utils.h"
 #include "core/graph/graph_viewer.h"
 #include "core/graph/model.h"
+#include "core/graph/model_editor_api_types.h"
+#include "core/graph/model_saving_options.h"
 #include "core/optimizer/graph_transformer_utils.h"
 #include "core/optimizer/graph_transformer.h"
+#include "core/optimizer/graph_optimizer_registry.h"
 #include "core/optimizer/layout_transformation/layout_transformation.h"
 #include "core/optimizer/insert_cast_transformer.h"
 #include "core/optimizer/qdq_transformer/ensure_unique_dq_for_node_unit.h"
@@ -66,11 +69,11 @@
 #include "core/optimizer/stft_decomposition.h"
 #endif
 #include "core/session/environment.h"
-#include "core/session/user_logging_sink.h"
 #include "core/session/IOBinding.h"
 #include "core/session/inference_session_utils.h"
 #include "core/session/onnxruntime_session_options_config_keys.h"
 #include "core/session/onnxruntime_run_options_config_keys.h"
+#include "core/session/user_logging_sink.h"
 #include "core/util/protobuf_parsing_utils.h"
 #include "core/util/thread_utils.h"
 
@@ -920,7 +923,7 @@ common::Status InferenceSession::SaveToOrtFormat(const std::filesystem::path& fi
   ORT_RETURN_IF_ERROR(kernel_type_str_resolver.RegisterGraphNodeOpSchemas(model_->MainGraph()));
   ORT_RETURN_IF_ERROR(standalone::RegisterCustomOpNodeSchemas(kernel_type_str_resolver, model_->MainGraph()));
 
-  for (const auto op_schema : saved_runtime_optimization_produced_node_op_schemas_) {
+  for (const auto& op_schema : saved_runtime_optimization_produced_node_op_schemas_) {
     ORT_RETURN_IF_ERROR(kernel_type_str_resolver.RegisterOpSchema(*op_schema));
   }
 
@@ -1089,7 +1092,14 @@ common::Status InferenceSession::Load(const void* model_data, int model_data_len
 
     const bool strict_shape_type_inference = session_options_.config_options.GetConfigOrDefault(
                                                  kOrtSessionOptionsConfigStrictShapeTypeInference, "0") == "1";
-    return onnxruntime::Model::Load(std::move(model_proto), PathString(), model,
+
+    std::string external_data_folder_path = session_options_.config_options.GetConfigOrDefault(
+        kOrtSessionOptionsModelExternalInitializersFileFolderPath, "");
+    if (!external_data_folder_path.empty() && model_location_.empty()) {
+      model_location_ = ToPathString(external_data_folder_path + "/virtual_model.onnx");
+    }
+
+    return onnxruntime::Model::Load(std::move(model_proto), model_location_, model,
                                     HasLocalSchema() ? &custom_schema_registries_ : nullptr, *session_logger_,
                                     ModelOptions(true, strict_shape_type_inference));
   };
@@ -1119,8 +1129,15 @@ common::Status InferenceSession::LoadOnnxModel(ModelProto model_proto) {
 #endif
     const bool strict_shape_type_inference = session_options_.config_options.GetConfigOrDefault(
                                                  kOrtSessionOptionsConfigStrictShapeTypeInference, "0") == "1";
+
+    std::string external_data_folder_path = session_options_.config_options.GetConfigOrDefault(
+        kOrtSessionOptionsModelExternalInitializersFileFolderPath, "");
+    if (!external_data_folder_path.empty() && model_location_.empty()) {
+      model_location_ = ToPathString(external_data_folder_path + "/virtual_model.onnx");
+    }
+
     // This call will move model_proto to the constructed model instance
-    return onnxruntime::Model::Load(std::move(model_proto), PathString(), model,
+    return onnxruntime::Model::Load(std::move(model_proto), model_location_, model,
                                     HasLocalSchema() ? &custom_schema_registries_ : nullptr, *session_logger_,
                                     ModelOptions(true, strict_shape_type_inference));
   };
@@ -1156,7 +1173,14 @@ common::Status InferenceSession::Load(std::istream& model_istream, bool allow_re
                                                  kOrtSessionOptionsConfigStrictShapeTypeInference, "0") == "1";
     ModelOptions model_opts(allow_released_opsets_only,
                             strict_shape_type_inference);
-    return onnxruntime::Model::Load(std::move(model_proto), PathString(), model,
+
+    std::string external_data_folder_path = session_options_.config_options.GetConfigOrDefault(
+        kOrtSessionOptionsModelExternalInitializersFileFolderPath, "");
+    if (!external_data_folder_path.empty() && model_location_.empty()) {
+      model_location_ = ToPathString(external_data_folder_path + "/virtual_model.onnx");
+    }
+
+    return onnxruntime::Model::Load(std::move(model_proto), model_location_, model,
                                     HasLocalSchema() ? &custom_schema_registries_ : nullptr,
                                     *session_logger_, model_opts);
   };
@@ -1193,6 +1217,56 @@ common::Status InferenceSession::Load() {
   return LoadWithLoader(loader, "model_loading_from_saved_proto");
 }
 
+common::Status InferenceSession::Load(const OrtModel& model_editor_api_model) {
+  std::lock_guard<std::mutex> l(session_mutex_);
+
+  if (is_model_loaded_) {  // already loaded
+    Status status(common::ONNXRUNTIME, common::MODEL_LOADED, "This session already contains a loaded model.");
+    LOGS(*session_logger_, ERROR) << status.ErrorMessage();
+    return status;
+  }
+
+  if (is_inited_) {
+    Status status(common::ONNXRUNTIME, common::MODEL_LOADED, "This session has already been initialized.");
+    LOGS(*session_logger_, ERROR) << status.ErrorMessage();
+    return status;
+  }
+
+  const bool strict_shape_type_inference = session_options_.config_options.GetConfigOrDefault(
+                                               kOrtSessionOptionsConfigStrictShapeTypeInference, "0") == "1";
+
+  // need to go from unique_ptr to shared_ptr when moving into model_
+  std::unique_ptr<Model> tmp_model;
+  ORT_RETURN_IF_ERROR(Model::LoadFromModelEditorApiModel(model_editor_api_model,
+                                                         HasLocalSchema() ? &custom_schema_registries_ : nullptr,
+                                                         ModelOptions(true, strict_shape_type_inference),
+                                                         *session_logger_, tmp_model));
+
+  model_ = std::move(tmp_model);
+
+  is_model_loaded_ = true;
+
+  return Status::OK();
+}
+
+common::Status InferenceSession::ApplyUpdates(const OrtModel& model_editor_api_model) {
+  std::lock_guard<std::mutex> l(session_mutex_);
+
+  if (!is_model_loaded_) {
+    Status status(common::ONNXRUNTIME, common::MODEL_LOADED, "This session does not contain a loaded model.");
+    LOGS(*session_logger_, ERROR) << status.ErrorMessage();
+    return status;
+  }
+
+  if (is_inited_) {
+    Status status(common::ONNXRUNTIME, common::MODEL_LOADED, "This session has already been initialized.");
+    LOGS(*session_logger_, ERROR) << status.ErrorMessage();
+    return status;
+  }
+
+  return model_->MainGraph().UpdateUsingModelEditorApiModel(model_editor_api_model);
+}
+
 common::Status InferenceSession::TransformGraph(onnxruntime::Graph& graph, bool saving_model_in_ort_format) {
   // The transformer order:
   // 1. Ensure we inline as many functions as possible. We refer to it as Ahead Of Time (AOT) function inlining.
@@ -1205,8 +1279,13 @@ common::Status InferenceSession::TransformGraph(onnxruntime::Graph& graph, bool 
   // 6. insert cast nodes (required transformer).
   // 7. insert copy nodes (required transformer).
 
+  // Create GraphOptimizerRegistry instance for providing predefined graph optimizers and selection functions for EPs to lookup
+  auto graph_optimizer_registry = std::make_unique<GraphOptimizerRegistry>(&session_options_,
+                                                                           execution_providers_.Get(onnxruntime::kCpuExecutionProvider),
+                                                                           session_logger_);
+  GraphPartitioner partitioner(kernel_registry_manager_, execution_providers_, std::move(graph_optimizer_registry));
+
   // Run Ahead Of time function inlining
-  GraphPartitioner partitioner(kernel_registry_manager_, execution_providers_);
   if (const bool disable_aot_function_inlining =
           session_options_.config_options.GetConfigOrDefault(
               kOrtSessionOptionsDisableAheadOfTimeFunctionInlining, "0") == "1";
@@ -1593,12 +1672,23 @@ common::Status InferenceSession::AddPrePackedWeightsContainer(PrepackedWeightsCo
   return Status::OK();
 }
 
+#if !defined(ORT_MINIMAL_BUILD)
+Status onnxruntime::InferenceSession::CreateNodeStatsRecorder(const std::filesystem::path& node_stats_file) {
+  if (node_stats_recorder_.has_value()) {
+    return ORT_MAKE_STATUS(ONNXRUNTIME, INVALID_ARGUMENT,
+                           "The session already has an instance of NodeStatsRecorder");
+  }
+  node_stats_recorder_.emplace(node_stats_file);
+  return Status::OK();
+}
+#endif
+
 namespace {
 Status PartitionOrtFormatModel(onnxruntime::Graph& graph,
                                const ExecutionProviders& providers,
                                KernelRegistryManager& kernel_registry_manager,
                                SessionState& session_state,
-                               const ConfigOptions& config_options,
+                               const SessionOptions& sess_options,
                                const logging::Logger& logger) {
   layout_transformation::TransformLayoutFunction transform_layout_fn = nullptr;
 
@@ -1616,11 +1706,16 @@ Status PartitionOrtFormatModel(onnxruntime::Graph& graph,
   }
 #endif  // !defined(ORT_MINIMAL_BUILD) || defined(ORT_EXTENDED_MINIMAL_BUILD)
 
-  GraphPartitioner partitioner(kernel_registry_manager, providers);
+  // Create GraphOptimizerRegistry instance for providing predefined graph optimizers and selection functions for EPs to lookup
+  auto graph_optimizer_registry = std::make_unique<GraphOptimizerRegistry>(&sess_options,
+                                                                           providers.Get(onnxruntime::kCpuExecutionProvider),
+                                                                           &logger);
+
+  GraphPartitioner partitioner(kernel_registry_manager, providers, std::move(graph_optimizer_registry));
   ORT_RETURN_IF_ERROR(partitioner.Partition(graph,
                                             session_state.GetMutableFuncMgr(),
                                             transform_layout_fn,
-                                            config_options,
+                                            sess_options.config_options,
                                             logger,
                                             GraphPartitioner::Mode::kOrtFormatLoad));
 
@@ -1644,7 +1739,7 @@ Status ApplyOrtFormatModelRuntimeOptimizations(
        level <= static_cast<int>(session_options.graph_optimization_level);
        ++level) {
     const auto transformers = optimizer_utils::GenerateTransformersForMinimalBuild(
-        static_cast<TransformerLevel>(level), session_options, SatRuntimeOptimizationLoadContext{}, cpu_ep,
+        static_cast<TransformerLevel>(level), session_options, SatRuntimeOptimizationLoadContext{}, cpu_ep, logger,
         optimizers_to_disable, intra_op_thread_pool, p_buffered_tensors);
 
     for (const auto& transformer : transformers) {
@@ -1794,6 +1889,17 @@ common::Status InferenceSession::Initialize() {
       }
     }
 
+#if !defined(ORT_MINIMAL_BUILD)
+    const std::string node_stats_file = session_options_.config_options.GetConfigOrDefault(
+        kOrtSessionOptionsCollectNodeMemoryStatsToFile, "");
+
+    if (!node_stats_file.empty()) {
+      ORT_RETURN_IF_ERROR_SESSIONID_(CreateNodeStatsRecorder(node_stats_file));
+    }
+
+    session_state_->SetNodeStatsRecorder(GetNodeStatsRecorder());
+#endif
+
 #if !defined(ORT_MINIMAL_BUILD) && defined(ORT_MEMORY_PROFILE)
     // Don't want to pollute SessionState constructor since memory profile is enabled optionally.
     session_state_->SetMemoryProfiler(&memory_profiler_);
@@ -1840,7 +1946,8 @@ common::Status InferenceSession::Initialize() {
       ORT_RETURN_IF_ERROR_SESSIONID_(AddPredefinedTransformers(graph_transformer_mgr_,
                                                                session_options_.graph_optimization_level,
                                                                minimal_build_optimization_handling,
-                                                               record_runtime_optimization_produced_op_schema));
+                                                               record_runtime_optimization_produced_op_schema,
+                                                               *session_logger_));
 
 #ifdef USE_DML
       const IExecutionProvider* dmlExecutionProvider = execution_providers_.Get(kDmlExecutionProvider);
@@ -2051,7 +2158,7 @@ common::Status InferenceSession::Initialize() {
 #endif  // !defined(ORT_MINIMAL_BUILD)
     } else {
       ORT_RETURN_IF_ERROR_SESSIONID_(PartitionOrtFormatModel(graph, execution_providers_, kernel_registry_manager_,
-                                                             *session_state_, session_options_.config_options, *session_logger_));
+                                                             *session_state_, session_options_, *session_logger_));
 
 #if !defined(ORT_MINIMAL_BUILD) || defined(ORT_EXTENDED_MINIMAL_BUILD)
       const auto& cpu_ep = *execution_providers_.Get(onnxruntime::kCpuExecutionProvider);
@@ -2098,13 +2205,12 @@ common::Status InferenceSession::Initialize() {
           const size_t optimized_model_external_initializers_min_size_in_bytes =
               ParseStringWithClassicLocale<size_t>(session_options_.config_options.GetConfigOrDefault(
                   kOrtSessionOptionsOptimizedModelExternalInitializersMinSizeInBytes, "1024"));
-          Graph::OffsetAlignmentInfo align_info;
-          align_info.align_offset = true;
+          ModelSavingOptions model_saving_options{optimized_model_external_initializers_min_size_in_bytes};
+          model_saving_options.align_offset = true;
           ORT_RETURN_IF_ERROR_SESSIONID_(Model::SaveWithExternalInitializers(*model_,
                                                                              session_options_.optimized_model_filepath,
                                                                              optimized_model_external_initializers_file_name,
-                                                                             optimized_model_external_initializers_min_size_in_bytes,
-                                                                             align_info));
+                                                                             model_saving_options));
         }
       }
     }
@@ -2112,7 +2218,7 @@ common::Status InferenceSession::Initialize() {
     std::vector<TuningResults> tuning_results;
     bool found_tuning_results = false;
     ORT_RETURN_IF_ERROR_SESSIONID_(inference_session_utils::ParseTuningResultsFromModelMetadata(
-        model_metadata_, tuning_results, found_tuning_results));
+        model_metadata_, tuning_results, found_tuning_results, *session_logger_));
     if (found_tuning_results) {
       ORT_RETURN_IF_ERROR_SESSIONID_(SetTuningResults(tuning_results, /*error_on_invalid*/ false, /*auto_enable*/ true));
     }
@@ -2725,6 +2831,14 @@ Status InferenceSession::Run(const RunOptions& run_options,
   TraceLoggingWriteStop(ortrun_activity, "OrtRun");
 #endif
 
+#if !defined(ORT_MINIMAL_BUILD)
+  if (IsNodeStatsCollectionEnabled() && retval.IsOK()) {
+    // Dump node stats if the run was successful
+    node_stats_recorder_->DumpStats(session_state_->GetGraphViewer().ModelPath());
+    node_stats_recorder_->ResetPerRunNameDeduper();
+  }
+#endif
+
   // As N+1 inference runs (N for memory allocation and 1 for graph capturing)
   // are needed before replaying the captured graph, here run N inference runs recursively until graph captured,
   // so that users just need one session run to capture the graph.
@@ -3233,7 +3347,8 @@ common::Status InferenceSession::AddPredefinedTransformers(
     GraphTransformerManager& transformer_manager,
     TransformerLevel graph_optimization_level,
     MinimalBuildOptimizationHandling minimal_build_optimization_handling,
-    RecordRuntimeOptimizationProducedNodeOpSchemaFn record_runtime_optimization_produced_op_schema_fn) const {
+    RecordRuntimeOptimizationProducedNodeOpSchemaFn record_runtime_optimization_produced_op_schema_fn,
+    const logging::Logger& logger) const {
   const auto& cpu_ep = *execution_providers_.Get(onnxruntime::kCpuExecutionProvider);
   for (int i = static_cast<int>(TransformerLevel::Level1); i <= static_cast<int>(TransformerLevel::MaxLevel); i++) {
     TransformerLevel level = static_cast<TransformerLevel>(i);
@@ -3245,7 +3360,7 @@ common::Status InferenceSession::AddPredefinedTransformers(
             minimal_build_optimization_handling == MinimalBuildOptimizationHandling::ApplyFullBuildOptimizations;
 
         if (use_full_build_optimizations) {
-          return optimizer_utils::GenerateTransformers(level, session_options_, cpu_ep,
+          return optimizer_utils::GenerateTransformers(level, session_options_, cpu_ep, logger,
                                                        optimizers_to_disable_,
                                                        GetIntraOpThreadPoolToUse(),
                                                        session_state_->GetMutableBufferedTensors());
@@ -3257,6 +3372,7 @@ common::Status InferenceSession::AddPredefinedTransformers(
                         record_runtime_optimization_produced_op_schema_fn}}
                   : SatApplyContextVariant{SatDirectApplicationContext{}};
           return optimizer_utils::GenerateTransformersForMinimalBuild(level, session_options_, sat_context, cpu_ep,
+                                                                      logger,
                                                                       optimizers_to_disable_,
                                                                       GetIntraOpThreadPoolToUse(),
                                                                       session_state_->GetMutableBufferedTensors());
@@ -3280,6 +3396,10 @@ common::Status InferenceSession::WaitForNotification(Notification* p_executor_do
   p_executor_done->Wait();
 
   return Status::OK();
+}
+
+const Model& InferenceSession::GetModel() const {
+  return *model_;
 }
 
 SessionIOBinding::SessionIOBinding(InferenceSession* session) : sess_(session) {

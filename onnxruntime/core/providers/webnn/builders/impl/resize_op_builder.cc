@@ -21,6 +21,8 @@ namespace webnn {
 class ResizeOpBuilder : public BaseOpBuilder {
   // Add operator related.
  public:
+  // Allow roi and scales potentially being empty inputs that are ignored during processing.
+  ResizeOpBuilder() : BaseOpBuilder(/*allow empty inputs*/ true) {}
   void AddInitializersToSkip(ModelBuilder& model_builder, const Node& node) const override;
 
  private:
@@ -223,7 +225,7 @@ Status ResizeOpBuilder::AddToModelBuilderImpl(ModelBuilder& model_builder,
   if (using_sizes) {
     ORT_RETURN_IF_NOT(GetResizeSizesAndAxes(initializers, node, sizes, axes, is_nhwc, input_shape, logger),
                       "Error getting Resize sizes");
-    webnn_sizes = GetVecUint32FromVecInt64(sizes);
+    webnn_sizes = GetNarrowedIntfromInt64<uint32_t>(sizes);
     options.set("sizes", emscripten::val::array(webnn_sizes));
   } else {
     ORT_RETURN_IF_NOT(GetResizeScalesAndAxes(initializers, node, scales, axes, is_nhwc, logger),
@@ -231,7 +233,7 @@ Status ResizeOpBuilder::AddToModelBuilderImpl(ModelBuilder& model_builder,
     options.set("scales", emscripten::val::array(scales));
   }
 
-  std::vector<uint32_t> webnn_axes = GetVecUint32FromVecInt64(axes);
+  std::vector<uint32_t> webnn_axes = GetNarrowedIntfromInt64<uint32_t>(axes);
   options.set("axes", emscripten::val::array(webnn_axes));
 
   emscripten::val input = model_builder.GetOperand(input_defs[0]->Name());

@@ -5,11 +5,7 @@
 
 #include <iosfwd>
 
-#ifdef __EMSCRIPTEN__
-#include <emscripten/emscripten.h>
-#endif
-
-#include <webgpu/webgpu_cpp.h>
+#include "core/providers/webgpu/webgpu_external_header.h"
 
 #include "core/framework/execution_provider.h"
 

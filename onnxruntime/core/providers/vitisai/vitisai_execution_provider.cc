@@ -1,6 +1,7 @@
 // Copyright (c) 2023 Advanced Micro Devices, Inc. All rights reserved.
 // Licensed under the MIT License.
 #include "vitisai_execution_provider.h"
+#include "vitisai_profiler.h"
 
 // Standard headers/libs.
 #include <cassert>
@@ -50,7 +51,7 @@ const InlinedVector<const Node*> VitisAIExecutionProvider::GetEpContextNodes() c
   return ep_context_node_ptrs;
 }
 std::vector<std::unique_ptr<ComputeCapability>> VitisAIExecutionProvider::GetCapability(
-    const onnxruntime::GraphViewer& graph_viewer, const IKernelLookup& kernel_lookup) const {
+    const onnxruntime::GraphViewer& graph_viewer, const IKernelLookup& kernel_lookup, const GraphOptimizerRegistry& /* graph_optimizer_registry */, IResourceAccountant* /* resource_accountant */) const {
   if (graph_viewer.IsSubgraph()) {
     // VITIS AI EP not support sungraph. Assigned to CPU.
     return {};
@@ -134,5 +135,9 @@ common::Status VitisAIExecutionProvider::SetEpDynamicOptions(gsl::span<const cha
     return Status(onnxruntime::common::ONNXRUNTIME, onnxruntime::common::StatusCode::FAIL, error_msg);
   }
   return Status::OK();
+}
+
+std::unique_ptr<profiling::EpProfiler> VitisAIExecutionProvider::GetProfiler() {
+  return std::make_unique<profiling::VitisaiProfiler>();
 }
 }  // namespace onnxruntime

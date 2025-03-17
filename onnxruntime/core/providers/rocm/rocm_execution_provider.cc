@@ -2440,7 +2440,9 @@ std::unique_ptr<onnxruntime::IDataTransfer> ROCMExecutionProvider::GetDataTransf
 
 std::vector<std::unique_ptr<ComputeCapability>>
 ROCMExecutionProvider::GetCapability(const onnxruntime::GraphViewer& graph,
-                                     const IKernelLookup& kernel_lookup) const {
+                                     const IKernelLookup& kernel_lookup,
+                                     const GraphOptimizerRegistry& /* graph_optimizer_registry */,
+                                     IResourceAccountant* /* resource_accountant */) const {
   InlinedVector<NodeIndex> candidates;
   // A subset of the above vector. A subset of the tentative_nodes might be moved to CPU.
   InlinedVector<NodeIndex> tentative_nodes;
@@ -2493,7 +2495,7 @@ ROCMExecutionProvider::GetCapability(const onnxruntime::GraphViewer& graph,
   // For ROCM EP, exclude the subgraph that is preferred to be placed in CPU
   // These are usually shape related computation subgraphs
   // Following logic can be extended for other EPs
-  auto cpu_nodes = GetCpuPreferredNodes(graph, kernel_lookup, tentative_nodes);
+  auto cpu_nodes = GetCpuPreferredNodes(graph, kernel_lookup, tentative_nodes, logger);
   std::vector<std::unique_ptr<ComputeCapability>> result;
   for (auto& node_index : candidates) {
     if (cpu_nodes.count(node_index) > 0)

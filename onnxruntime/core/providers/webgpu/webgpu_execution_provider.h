@@ -22,38 +22,37 @@ enum class BufferCacheMode;
 class WebGpuProfiler;
 }  // namespace webgpu
 
-struct WebGpuExecutionProviderInfo {
-  WebGpuExecutionProviderInfo(DataLayout data_layout, bool enable_graph_capture)
+struct WebGpuExecutionProviderConfig {
+  WebGpuExecutionProviderConfig(DataLayout data_layout, bool enable_graph_capture, bool enable_pix_capture)
       : data_layout{data_layout},
         enable_graph_capture{enable_graph_capture},
-        storage_buffer_cache_mode{},
-        uniform_buffer_cache_mode{},
-        query_resolve_buffer_cache_mode{},
-        default_buffer_cache_mode{} {}
-  WebGpuExecutionProviderInfo(WebGpuExecutionProviderInfo&&) = default;
-  WebGpuExecutionProviderInfo& operator=(WebGpuExecutionProviderInfo&&) = default;
-  ORT_DISALLOW_COPY_AND_ASSIGNMENT(WebGpuExecutionProviderInfo);
+        enable_pix_capture{enable_pix_capture} {}
+  WebGpuExecutionProviderConfig(WebGpuExecutionProviderConfig&&) = default;
+  WebGpuExecutionProviderConfig& operator=(WebGpuExecutionProviderConfig&&) = default;
+  ORT_DISALLOW_COPY_AND_ASSIGNMENT(WebGpuExecutionProviderConfig);
 
   DataLayout data_layout;
   bool enable_graph_capture;
-  webgpu::BufferCacheMode storage_buffer_cache_mode;
-  webgpu::BufferCacheMode uniform_buffer_cache_mode;
-  webgpu::BufferCacheMode query_resolve_buffer_cache_mode;
-  webgpu::BufferCacheMode default_buffer_cache_mode;
+  bool enable_pix_capture;
   std::vector<std::string> force_cpu_node_names;
 };
 
 class WebGpuExecutionProvider : public IExecutionProvider {
  public:
-  WebGpuExecutionProvider(int context_id, webgpu::WebGpuContext& context, WebGpuExecutionProviderInfo&& info);
+  WebGpuExecutionProvider(int context_id, webgpu::WebGpuContext& context, WebGpuExecutionProviderConfig&& config);
   ~WebGpuExecutionProvider() override;
 
   std::vector<std::unique_ptr<ComputeCapability>> GetCapability(
       const onnxruntime::GraphViewer& graph_viewer,
-      const IKernelLookup& /*kernel_lookup*/) const override;
+      const IKernelLookup& /*kernel_lookup*/,
+      const GraphOptimizerRegistry& /* graph_optimizer_registry */,
+      IResourceAccountant* /* resource_accountant */) const override;
 
   std::shared_ptr<KernelRegistry> GetKernelRegistry() const override;
   std::unique_ptr<onnxruntime::IDataTransfer> GetDataTransfer() const override;
+#if defined(__wasm__)
+  std::unique_ptr<onnxruntime::IExternalDataLoader> GetExternalDataLoader() const override;
+#endif
 
   DataLayout GetPreferredLayout() const override { return preferred_data_layout_; }
 
